@@ -35,6 +35,22 @@ header.top .sub b { color: var(--navy); }
 .nutr-v { font-size: 15px; font-weight: 600; color: var(--navy); }
 .nutr-l { font-size: 11.5px; color: var(--mute); letter-spacing: .03em; text-transform: uppercase; }
 .nutr-note { margin-left: auto; font-size: 11px; color: var(--mute); font-style: italic; }
+.portions-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: var(--accent); border: 1px solid #c7dccd; border-radius: 8px; margin-top: 8px; flex-wrap: wrap; }
+.portions-label { font-size: 11.5px; color: var(--green); letter-spacing: .03em; text-transform: uppercase; font-weight: 600; }
+.portions-stepper { display: inline-flex; align-items: center; border: 1px solid #b9cdc0; border-radius: 6px; overflow: hidden; background: #fff; }
+.portions-btn { background: #fff; border: 0; padding: 3px 11px; font: inherit; font-size: 16px; font-weight: 600; color: var(--green); cursor: pointer; user-select: none; line-height: 1.2; }
+.portions-btn:hover:not(:disabled) { background: var(--accent); }
+.portions-btn:disabled { color: var(--mute); cursor: not-allowed; opacity: .45; }
+.portions-val { padding: 3px 12px; font-weight: 700; color: var(--navy); min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; border-left: 1px solid #e1ebe4; border-right: 1px solid #e1ebe4; }
+.portions-info { font-size: 12px; color: var(--mute); }
+.portions-info b { color: var(--navy); font-weight: 600; }
+.portions-reset { background: transparent; border: 0; color: var(--mute); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 4px; text-decoration: underline; margin-left: auto; }
+.portions-reset:hover { color: var(--navy); }
+.portions-reset[hidden] { display: none; }
+.day-header .portion-badge { color: var(--green); font-size: 12px; font-weight: 600; margin-left: 6px; padding: 1px 7px; background: var(--accent); border-radius: 10px; }
+.day-header .portion-badge[hidden] { display: none; }
+.shop-header .scaled-note { color: var(--green); font-size: 12px; font-weight: 500; margin-left: 4px; }
+.shop-header .scaled-note[hidden] { display: none; }
 .nutr { color: var(--navy); font-weight: 500; }
 .nutr b { font-weight: 700; }
 .meta .sep { color: var(--line); padding: 0 1px; }
@@ -69,6 +85,10 @@ header.top .sub b { color: var(--navy); }
   .nutr-bar { flex-wrap: wrap; gap: 12px; }
   .nutr-note { width: 100%; margin-left: 0; }
   .shop-body ul { column-count: 1; }
+  .portions-bar { gap: 8px; padding: 8px 10px; }
+  .portions-info { width: 100%; order: 5; }
+  .portions-reset { margin-left: 0; }
+  .day-header .portion-badge { font-size: 11px; padding: 1px 6px; }
 }
 </style>
 </head>
@@ -102,51 +122,138 @@ function currentBlock(){
   return { rot, w1, w2 };
 }
 
+// ---------- Portionen-State (localStorage) ----------
+const BASE_PERSONS = (POOL.meta && POOL.meta.persons) || 2;
+const MIN_PORTIONS = 1;
+const MAX_PORTIONS = 12;
+const PORTIONS_STORAGE_KEY = "kochplan_portions_v1";
+
+function loadPortionState(){
+  try { const s = localStorage.getItem(PORTIONS_STORAGE_KEY); return s ? JSON.parse(s) : {}; }
+  catch(e) { return {}; }
+}
+function savePortionState(){
+  try { localStorage.setItem(PORTIONS_STORAGE_KEY, JSON.stringify(portionState)); } catch(e) {}
+}
+const portionState = loadPortionState();
+
+function portionsFor(letter, dayIdx){
+  const wk = portionState[letter];
+  if (!wk) return BASE_PERSONS;
+  const v = wk[dayIdx];
+  return (typeof v === "number" && v >= MIN_PORTIONS && v <= MAX_PORTIONS) ? v : BASE_PERSONS;
+}
+function setPortionsFor(letter, dayIdx, n){
+  if (n === BASE_PERSONS){
+    if (portionState[letter]){
+      delete portionState[letter][dayIdx];
+      if (Object.keys(portionState[letter]).length === 0) delete portionState[letter];
+    }
+  } else {
+    if (!portionState[letter]) portionState[letter] = {};
+    portionState[letter][dayIdx] = n;
+  }
+  savePortionState();
+}
+
+// ---------- Mengen-Skalierung ----------
+function parseGermanNum(s){
+  if (s.indexOf("/") !== -1){
+    const [a,b] = s.split("/").map(x => parseFloat(x.replace(",", ".")));
+    if (b) return a / b;
+  }
+  return parseFloat(s.replace(",", "."));
+}
+function formatScaledNum(n){
+  if (!isFinite(n)) return "";
+  if (n >= 100) return String(Math.round(n / 5) * 5);
+  if (n >= 20)  return String(Math.round(n));
+  if (Math.abs(n - Math.round(n)) < 0.05) return String(Math.round(n));
+  // halbe Schritte
+  const half = Math.round(n * 2) / 2;
+  if (Math.abs(half - n) < 0.05) return String(half).replace(".", ",");
+  // viertel Schritte
+  return String(Math.round(n * 4) / 4).replace(".", ",");
+}
+// Skaliert Mengen-Strings wie "400 g", "2 EL", "2-3", "1/2 Bund", "2 x 400 g".
+// Pure Texte ("nach Geschmack") bleiben unverändert.
+function scaleQty(qty, factor){
+  if (!qty || factor === 1) return qty;
+  if (!/[0-9]/.test(qty)) return qty;
+  // Sonderfall "N x M unit" → nur die führende Anzahl skalieren (Dosen, Päckchen etc.).
+  var xMatch = qty.match(/^(\s*)([0-9]+(?:[.,][0-9]+)?)(\s*[x×]\s*)(.+)$/);
+  if (xMatch){
+    return xMatch[1] + formatScaledNum(parseGermanNum(xMatch[2]) * factor) + xMatch[3] + xMatch[4];
+  }
+  // Ein Pass: Ranges UND Einzelzahlen in einer Regex.
+  var NUM = "[0-9]+(?:\\/[0-9]+)?(?:[.,][0-9]+)?";
+  var re = new RegExp("(" + NUM + ")\\s*[-–]\\s*(" + NUM + ")|(" + NUM + ")", "g");
+  return qty.replace(re, function(_m, a, b, single){
+    if (a && b){
+      return formatScaledNum(parseGermanNum(a) * factor) + "–" + formatScaledNum(parseGermanNum(b) * factor);
+    }
+    return formatScaledNum(parseGermanNum(single) * factor);
+  });
+}
+
 function nutrChips(n){
   if(!n) return "";
   return `<span class="nutr"><b>${n.kcal}</b> kcal <span class="sep">·</span> P ${n.protein_g} g <span class="sep">·</span> F ${n.fat_g} g</span>`;
 }
-function buildShoppingList(days){
+function buildShoppingList(days, letter){
   const map = new Map();
-  for(const d of days){
-    for(const ing of (d.ingredients||[])){
-      const key = (ing.item||"").trim();
-      if(!key) continue;
-      if(!map.has(key)) map.set(key, []);
-      map.get(key).push((ing.qty||"").trim());
+  days.forEach((d, idx) => {
+    const factor = portionsFor(letter, idx) / BASE_PERSONS;
+    for (const ing of (d.ingredients || [])){
+      const key = (ing.item || "").trim();
+      if (!key) continue;
+      const scaled = scaleQty((ing.qty || "").trim(), factor);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(scaled);
     }
-  }
+  });
   return Array.from(map.entries())
-    .sort((a,b) => a[0].localeCompare(b[0], "de"))
+    .sort((a, b) => a[0].localeCompare(b[0], "de"))
     .map(([item, qtys]) => ({ item, qty: qtys.filter(Boolean).join(" + ") }));
 }
 function shopCard(days, letter){
-  const items = buildShoppingList(days);
   const art = document.createElement("article");
   art.className = "shop";
   const hd = document.createElement("button");
   hd.className = "shop-header";
   hd.innerHTML = `
     <span class="label">Einkaufsliste Woche ${letter}</span>
-    <span class="count">${items.length} Zutaten</span>
+    <span class="scaled-note" hidden>· angepasst</span>
+    <span class="count">0 Zutaten</span>
     <span class="chev">›</span>`;
   const body = document.createElement("div");
   body.className = "shop-body";
-  body.innerHTML = `<ul>${items.map(i => `<li><span>${i.item}</span><span class="qty">${i.qty}</span></li>`).join("")}</ul>`;
   art.appendChild(hd);
   art.appendChild(body);
   hd.addEventListener("click", () => art.classList.toggle("open"));
-  return art;
+  const countEl = hd.querySelector(".count");
+  const noteEl = hd.querySelector(".scaled-note");
+  function refresh(){
+    const items = buildShoppingList(days, letter);
+    body.innerHTML = `<ul>${items.map(i => `<li><span>${i.item}</span><span class="qty">${i.qty}</span></li>`).join("")}</ul>`;
+    countEl.textContent = `${items.length} Zutaten`;
+    const anyScaled = days.some((_d, i) => portionsFor(letter, i) !== BASE_PERSONS);
+    noteEl.hidden = !anyScaled;
+  }
+  refresh();
+  return { article: art, refresh };
 }
-function dayCard(day, date){
+function dayCard(day, date, letter, dayIdx, onPortionsChange){
   const art = document.createElement("article");
   art.className = "day";
+  art.dataset.letter = letter;
+  art.dataset.idx = String(dayIdx);
   const hd = document.createElement("button");
   hd.className = "day-header";
   hd.innerHTML = `
     <span class="dow">${day.day}</span>
     <span class="dt">${fmtDate(date)}</span>
-    <span class="title">${day.title}</span>
+    <span class="title">${day.title}<span class="portion-badge" hidden></span></span>
     <span class="meta">${day.cuisine} · ${day.time_min} min${day.nutrition ? ` <span class="sep">·</span> ${nutrChips(day.nutrition)}` : ""}</span>
     <span class="chev">›</span>`;
   const body = document.createElement("div");
@@ -160,10 +267,20 @@ function dayCard(day, date){
     </div>` : "";
   body.innerHTML = `
     ${nutrBar}
+    <div class="portions-bar">
+      <span class="portions-label">Portionen</span>
+      <div class="portions-stepper">
+        <button class="portions-btn" data-act="dec" type="button" aria-label="weniger">−</button>
+        <span class="portions-val">${BASE_PERSONS}</span>
+        <button class="portions-btn" data-act="inc" type="button" aria-label="mehr">+</button>
+      </div>
+      <span class="portions-info">Standard: <b>${BASE_PERSONS}</b></span>
+      <button class="portions-reset" type="button" hidden>↺ zurücksetzen</button>
+    </div>
     <div class="panels">
       <div class="panel ing">
         <h3>Zutaten <span class="tags">${(day.tags||[]).map(t=>`<span class="tag">${t}</span>`).join("")}</span></h3>
-        <ul>${day.ingredients.map(i=>`<li><span>${i.item}</span><span class="qty">${i.qty}</span></li>`).join("")}</ul>
+        <ul></ul>
       </div>
       <div class="panel steps">
         <h3>Zubereitung</h3>
@@ -173,14 +290,50 @@ function dayCard(day, date){
   art.appendChild(hd);
   art.appendChild(body);
   hd.addEventListener("click", () => art.classList.toggle("open"));
+
+  const ingUl   = body.querySelector(".panel.ing ul");
+  const valEl   = body.querySelector(".portions-val");
+  const decBtn  = body.querySelector('.portions-btn[data-act="dec"]');
+  const incBtn  = body.querySelector('.portions-btn[data-act="inc"]');
+  const resetBtn = body.querySelector(".portions-reset");
+  const badge   = hd.querySelector(".portion-badge");
+
+  function renderForPortions(p){
+    const factor = p / BASE_PERSONS;
+    valEl.textContent = String(p);
+    decBtn.disabled = (p <= MIN_PORTIONS);
+    incBtn.disabled = (p >= MAX_PORTIONS);
+    resetBtn.hidden = (p === BASE_PERSONS);
+    if (p === BASE_PERSONS){
+      badge.hidden = true;
+      badge.textContent = "";
+    } else {
+      badge.hidden = false;
+      badge.textContent = `${p} Port.`;
+    }
+    ingUl.innerHTML = day.ingredients.map(i =>
+      `<li><span>${i.item}</span><span class="qty">${scaleQty(i.qty, factor)}</span></li>`
+    ).join("");
+  }
+  function setPortions(p){
+    p = Math.max(MIN_PORTIONS, Math.min(MAX_PORTIONS, p));
+    setPortionsFor(letter, dayIdx, p);
+    renderForPortions(p);
+    if (typeof onPortionsChange === "function") onPortionsChange();
+  }
+  decBtn.addEventListener("click", e => { e.stopPropagation(); setPortions(portionsFor(letter, dayIdx) - 1); });
+  incBtn.addEventListener("click", e => { e.stopPropagation(); setPortions(portionsFor(letter, dayIdx) + 1); });
+  resetBtn.addEventListener("click", e => { e.stopPropagation(); setPortions(BASE_PERSONS); });
+
+  // Initialdarstellung mit gespeichertem Wert
+  renderForPortions(portionsFor(letter, dayIdx));
   return art;
 }
-
 function render(){
   const { rot, w1, w2 } = currentBlock();
   const end = addDays(w2, 6);
   document.getElementById("sub").innerHTML =
-    `<b>Block ${rot[0]} + ${rot[1]}</b> · ${fmtFull(w1)} – ${fmtFull(end)} · Rotation alle 14 Tage · für 2 Personen`;
+    `<b>Block ${rot[0]} + ${rot[1]}</b> · ${fmtFull(w1)} – ${fmtFull(end)} · Rotation alle 14 Tage · Standard ${BASE_PERSONS} Personen (pro Rezept anpassbar)`;
 
   const host = document.getElementById("weeks");
   host.innerHTML = "";
@@ -191,10 +344,11 @@ function render(){
     const sec = document.createElement("section");
     sec.className = "week";
     sec.innerHTML = `<h2>${wk.label} <span class="range">${fmtDate(wstart)} – ${fmtDate(wend)}</span></h2>`;
-    sec.appendChild(shopCard(wk.days, letter));
+    const shop = shopCard(wk.days, letter);
+    sec.appendChild(shop.article);
     const list = document.createElement("div");
     list.className = "days";
-    wk.days.forEach((d, i) => list.appendChild(dayCard(d, addDays(wstart, i))));
+    wk.days.forEach((d, i) => list.appendChild(dayCard(d, addDays(wstart, i), letter, i, shop.refresh)));
     sec.appendChild(list);
     host.appendChild(sec);
   });
